@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evolutionary Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            overflow: hidden;
+            font-family: monospace;
+            color: white;
+        }
+        
+        #sim-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+            text-shadow: 1px 1px 2px black;
+        }
+        
+        #stats {
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+        }
+        
+        #controls {
+            background: rgba(0, 0, 0, 0.6);
+            padding: 10px;
+            border-radius: 5px;
+            pointer-events: auto;
+            font-size: 0.9rem;
+            max-width: 300px;
+        }
+        
+        #controls h3 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        
+        #controls p {
+            margin: 5px 0;
+            color: #ddd;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="sim-canvas"></canvas>
+    <div id="ui">
+        <div id="stats">
+            <div>Population: <span id="stat-pop">0</span></div>
+            <div>Time: <span id="stat-time">0</span></div>
+        </div>
+        <div id="controls">
+            <h3>Emergent Evolutionary Simulation</h3>
+            <p>Entities with heritable traits competing in a dynamic environment.</p>
+            <p>Colors: Evolving lineages (Hue mutation)</p>
+            <p>Background: Green = Food, Purple = Toxin</p>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById('sim-canvas');
+        const ctx = canvas.getContext('2d');
+        const statPop = document.getElementById('stat-pop');
+        const statTime = document.getElementById('stat-time');
+
+        let width, height;
+        let gridWidth, gridHeight;
+        const CELL_SIZE = 8; 
+
+        let foodGrid, foodGridNext;
+        let toxinGrid, toxinGridNext;
+        let envImageData;
+
+        let agents = [];
+        let time = 0;
+
+        const CONSTANTS = {
+            DIFFUSION_RATE: 0.05,
+            FOOD_DECAY: 0.005,
+            TOXIN_DECAY: 0.01,
+            MAX_FOOD: 100,
+            MAX_TOXIN: 100,
+            BASE_METABOLISM: 0.2,
+            MOVE_COST: 0.1,
+            TOXIN_PROD_COST: 1.0,
+            TOXIN_RESIST_COST: 0.5,
+            EAT_RATE: 5.0,
+            TOXIN_DAMAGE: 5.0,
+            MUTATION_RATE: 0.05,
+            MUTATION_STEP: 0.1,
+            LARGE_MUTATION_CHANCE: 0.02,
+            INITIAL_AGENTS: 300,
+            START_ENERGY: 500,
+        };
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            initGrid();
+            initAgents();
+            requestAnimationFrame(loop);
+        }
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            const newGridWidth = Math.ceil(width / CELL_SIZE);
+            const newGridHeight = Math.ceil(height / CELL_SIZE);
+            
+            if (newGridWidth !== gridWidth || newGridHeight !== gridHeight) {
+                gridWidth = newGridWidth;
+                gridHeight = newGridHeight;
+                initGrid();
+            }
+        }
+
+        function initGrid() {
+            const size = gridWidth * gridHeight;
+            foodGrid = new Float32Array(size);
+            foodGridNext = new Float32Array(size);
+            toxinGrid = new Float32Array(size);
+            toxinGridNext = new Float32Array(size);
+            envImageData = ctx.createImageData(gridWidth, gridHeight);
+        }
+
+        class Agent {
+            constructor(x, y, energy, genome) {
+                this.x = x;
+                this.y = y;
+                this.energy = energy;
+                this.genome = genome || this.randomGenome();
+                this.color = this.calculateColor();
+                this.age = 0;
+            }
+
+            randomGenome() {
+                return {
+                    attrFood: Math.random() * 2 - 1,
+                    avoidToxin: Math.random() * 2 - 1,
+                    produceToxin: Math.random(),
+                    resistToxin: Math.random(),
+                    repThreshold: 600 + Math.random() * 800,
+                    hue: Math.random() * 360
+                };
+            }
+            
+            mutate() {
+                const newGenome = { ...this.genome };
+                for (let key in newGenome) {
+                    if (Math.random() < CONSTANTS.MUTATION_RATE) {
+                        if (Math.random() < CONSTANTS.LARGE_MUTATION_CHANCE) {
+                            newGenome[key] = this.randomGenome()[key];
+                        } else {
+                            let step = (Math.random() * 2 - 1) * CONSTANTS.MUTATION_STEP;
+                            if (key === 'repThreshold') step *= 200;
+                            if (key === 'hue') step *= 30;
+                            newGenome[key] += step;
+                        }
+                    }
+                }
+                
+                newGenome.attrFood = Math.max(-1, Math.min(1, newGenome.attrFood));
+                newGenome.avoidToxin = Math.max(-1, Math.min(1, newGenome.avoidToxin));
+                newGenome.produceToxin = Math.max(0, Math.min(1, newGenome.produceToxin));
+                newGenome.resistToxin = Math.max(0, Math.min(1, newGenome.resistToxin));
+                newGenome.repThreshold = Math.max(400, Math.min(2000, newGenome.repThreshold));
+                
+                if (newGenome.hue < 0) newGenome.hue += 360;
+                if (newGenome.hue >= 360) newGenome.hue -= 360;
+
+                return newGenome;
+            }
+
+            calculateColor() {
+                return `hsl(${Math.floor(this.genome.hue)}, 100%, 50%)`;
+            }
+
+            update() {
+                this.age++;
+                
+                let gx = Math.floor(this.x / CELL_SIZE);
+                let gy = Math.floor(this.y / CELL_SIZE);
+                
+                gx = Math.max(0, Math.min(gridWidth - 1, gx));
+                gy = Math.max(0, Math.min(gridHeight - 1, gy));
+                
+                const idx = gy * gridWidth + gx;
+
+                let foodGradX = 0, foodGradY = 0;
+                let toxinGradX = 0, toxinGradY = 0;
+                
+                const senseRadius = 2;
+                for (let dy = -senseRadius; dy <= senseRadius; dy++) {
+                    for (let dx = -senseRadius; dx <= senseRadius; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        let nx = gx + dx;
+                        let ny = gy + dy;
+                        if (nx >= 0 && nx < gridWidth && ny >= 0 && ny < gridHeight) {
+                            let nIdx = ny * gridWidth + nx;
+                            let distSq = dx*dx + dy*dy;
+                            let weight = 1 / distSq;
+                            
+                            foodGradX += (foodGrid[nIdx] - foodGrid[idx]) * dx * weight;
+                            foodGradY += (foodGrid[nIdx] - foodGrid[idx]) * dy * weight;
+                            
+                            toxinGradX += (toxinGrid[nIdx] - toxinGrid[idx]) * dx * weight;
+                            toxinGradY += (toxinGrid[nIdx] - toxinGrid[idx]) * dy * weight;
+                        }
+                    }
+                }
+                
+                const moveSpeed = 1.5;
+                let vx = (foodGradX * this.genome.attrFood) + (toxinGradX * this.genome.avoidToxin);
+                let vy = (foodGradY * this.genome.attrFood) + (toxinGradY * this.genome.avoidToxin);
+                
+                vx += (Math.random() - 0.5) * 2.0;
+                vy += (Math.random() - 0.5) * 2.0;
+
+                let len = Math.sqrt(vx*vx + vy*vy) || 1;
+                vx = (vx / len) * moveSpeed;
+                vy = (vy / len) * moveSpeed;
+
+                this.x += vx;
+                this.y += vy;
+
+                if (this.x < 0) { this.x = 0; vx *= -1; }
+                if (this.x >= width) { this.x = width - 1; vx *= -1; }
+                if (this.y < 0) { this.y = 0; vy *= -1; }
+                if (this.y >= height) { this.y = height - 1; vy *= -1; }
+
+                let cellFood = foodGrid[idx];
+                let cellToxin = toxinGrid[idx];
+
+                let eaten = Math.min(cellFood, CONSTANTS.EAT_RATE);
+                foodGrid[idx] -= eaten;
+                this.energy += eaten * 2.0;
+
+                if (this.genome.produceToxin > 0) {
+                    let produced = this.genome.produceToxin * 0.5;
+                    toxinGrid[idx] = Math.min(CONSTANTS.MAX_TOXIN, toxinGrid[idx] + produced);
+                }
+
+                let damage = cellToxin * CONSTANTS.TOXIN_DAMAGE;
+                let mitigation = this.genome.resistToxin * 0.8;
+                damage = damage * (1 - mitigation);
+                this.energy -= damage;
+
+                let moveCost = CONSTANTS.MOVE_COST * len;
+                let traitCost = (this.genome.produceToxin * CONSTANTS.TOXIN_PROD_COST) + 
+                                (this.genome.resistToxin * CONSTANTS.TOXIN_RESIST_COST);
+                
+                this.energy -= (CONSTANTS.BASE_METABOLISM + moveCost + traitCost);
+            }
+
+            draw(ctx) {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                let radius = Math.max(1, Math.min(5, this.energy / 200));
+                ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                if (this.genome.produceToxin > 0.5) {
+                    ctx.shadowBlur = 10;
+                    ctx.shadowColor = 'purple';
+                    ctx.stroke();
+                    ctx.shadowBlur = 0;
+                }
+            }
+        }
+
+        function initAgents() {
+            agents = [];
+            for (let i = 0; i < CONSTANTS.INITIAL_AGENTS; i++) {
+                agents.push(new Agent(Math.random() * width, Math.random() * height, CONSTANTS.START_ENERGY));
+            }
+        }
+
+        function updateEnvironment() {
+            time++;
+            
+            const numSpots = 5;
+            for (let i = 0; i < numSpots; i++) {
+                let cx = (Math.sin(time * 0.005 + i) * 0.4 + 0.5) * gridWidth;
+                let cy = (Math.cos(time * 0.007 + i * 2) * 0.4 + 0.5) * gridHeight;
+                let radius = 10 + Math.sin(time * 0.01) * 5;
+                
+                let startX = Math.max(0, Math.floor(cx - radius));
+                let endX = Math.min(gridWidth - 1, Math.ceil(cx + radius));
+                let startY = Math.max(0, Math.floor(cy - radius));
+                let endY = Math.min(gridHeight - 1, Math.ceil(cy + radius));
+                
+                for (let y = startY; y <= endY; y++) {
+                    for (let x = startX; x <= endX; x++) {
+                        let distSq = (x - cx)**2 + (y - cy)**2;
+                        if (distSq < radius**2) {
+                            let idx = y * gridWidth + x;
+                            foodGrid[idx] = Math.min(CONSTANTS.MAX_FOOD, foodGrid[idx] + 2.0);
+                        }
+                    }
+                }
+            }
+
+            for (let y = 0; y < gridHeight; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    let idx = y * gridWidth + x;
+                    
+                    let fSum = foodGrid[idx];
+                    let tSum = toxinGrid[idx];
+                    let neighbors = 1;
+
+                    if (x > 0) { fSum += foodGrid[idx - 1]; tSum += toxinGrid[idx - 1]; neighbors++; }
+                    if (x < gridWidth - 1) { fSum += foodGrid[idx + 1]; tSum += toxinGrid[idx + 1]; neighbors++; }
+                    if (y > 0) { fSum += foodGrid[idx - gridWidth]; tSum += toxinGrid[idx - gridWidth]; neighbors++; }
+                    if (y < gridHeight - 1) { fSum += foodGrid[idx + gridWidth]; tSum += toxinGrid[idx + gridWidth]; neighbors++; }
+
+                    let fAvg = fSum / neighbors;
+                    let tAvg = tSum / neighbors;
+
+                    foodGridNext[idx] = foodGrid[idx] + (fAvg - foodGrid[idx]) * CONSTANTS.DIFFUSION_RATE;
+                    toxinGridNext[idx] = toxinGrid[idx] + (tAvg - toxinGrid[idx]) * CONSTANTS.DIFFUSION_RATE;
+
+                    foodGridNext[idx] *= (1.0 - CONSTANTS.FOOD_DECAY);
+                    toxinGridNext[idx] *= (1.0 - CONSTANTS.TOXIN_DECAY);
+                    
+                    if (foodGridNext[idx] < 0.01) foodGridNext[idx] = 0;
+                    if (toxinGridNext[idx] < 0.01) toxinGridNext[idx] = 0;
+                }
+            }
+
+            let tempF = foodGrid;
+            foodGrid = foodGridNext;
+            foodGridNext = tempF;
+            
+            let tempT = toxinGrid;
+            toxinGrid = toxinGridNext;
+            toxinGridNext = tempT;
+        }
+
+        function renderEnvironment() {
+            let data = envImageData.data;
+            for (let i = 0; i < gridWidth * gridHeight; i++) {
+                let f = Math.min(1, foodGrid[i] / (CONSTANTS.MAX_FOOD * 0.5));
+                let t = Math.min(1, toxinGrid[i] / (CONSTANTS.MAX_TOXIN * 0.5));
+                
+                let idx = i * 4;
+                
+                data[idx] = t * 150;
+                data[idx + 1] = f * 100;
+                data[idx + 2] = t * 150;
+                data[idx + 3] = 255;
+            }
+            
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = gridWidth;
+            tempCanvas.height = gridHeight;
+            tempCanvas.getContext('2d').putImageData(envImageData, 0, 0);
+            
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(tempCanvas, 0, 0, width, height);
+        }
+
+        function loop() {
+            updateEnvironment();
+            
+            let nextAgents = [];
+            
+            for (let i = 0; i < agents.length; i++) {
+                let agent = agents[i];
+                agent.update();
+                
+                if (agent.energy > 0) {
+                    nextAgents.push(agent);
+                    
+                    if (agent.energy > agent.genome.repThreshold) {
+                        agent.energy /= 2;
+                        let child = new Agent(
+                            agent.x + (Math.random() - 0.5) * 10,
+                            agent.y + (Math.random() - 0.5) * 10,
+                            agent.energy,
+                            agent.mutate()
+                        );
+                        nextAgents.push(child);
+                    }
+                }
+            }
+            
+            agents = nextAgents;
+            
+            if (agents.length === 0 && time > 100) {
+                initAgents();
+            }
+            
+            renderEnvironment();
+            
+            for (let i = 0; i < agents.length; i++) {
+                agents[i].draw(ctx);
+            }
+            
+            statPop.innerText = agents.length;
+            statTime.innerText = time;
+            
+            requestAnimationFrame(loop);
+        }
+
+        init();
+    </script>
+</body>
+</html>
